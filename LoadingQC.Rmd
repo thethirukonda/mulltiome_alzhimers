@@ -1,0 +1,392 @@
+---
+title: "Untitled"
+author: "Aakash Deva Thirukonda Prakash"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+
+# Restart R session before running (Session -> Restart R)
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(Seqinfo)        # important on Bioc 3.22+
+  library(GenomeInfoDb)
+  library(GenomicRanges)
+  library(EnsDb.Mmusculus.v79)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+})
+
+# 1) Versions (you want these to print WITHOUT errors)
+packageVersion("Seurat")
+packageVersion("Signac")
+packageVersion("SeuratObject")
+packageVersion("GenomeInfoDb")
+packageVersion("Seqinfo")
+
+# 2) The real “pass/fail” checks for your exact error:
+methods::hasMethod("seqinfo", "ChromatinAssay")  # should be TRUE
+methods::hasMethod("genome",  "ChromatinAssay")  # should be TRUE
+
+# 3) Optional: show the methods if you want to eyeball them
+ methods::showMethods("seqinfo")
+ methods::showMethods("genome")
+
+```
+
+```{r}
+find.package("Signac")
+.libPaths()
+methods::hasMethod("seqinfo","ChromatinAssay")
+
+```
+
+```{r}
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(Seqinfo)
+  library(GenomeInfoDb)
+  library(GenomicRanges)
+  library(EnsDb.Mmusculus.v79)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+})
+
+# sanity: this is the exact thing that was broken before
+stopifnot(methods::hasMethod("seqinfo", "ChromatinAssay"))
+
+# ----------------------------
+# Paths
+# ----------------------------
+setwd("~/Downloads/multiome_scrna_and_scatac")
+
+h5_file   <- "Multiome_RNA_ATAC_Mouse_Brain_Alzheimers_AppNote_filtered_feature_bc_matrix.h5"
+frag_path <- normalizePath(
+  "Multiome_RNA_ATAC_Mouse_Brain_Alzheimers_AppNote_atac_fragments.tsv.gz",
+  mustWork = TRUE
+)
+
+# ----------------------------
+# Load data
+# ----------------------------
+counts <- Read10X_h5(h5_file)
+rna_counts  <- counts[["Gene Expression"]]
+atac_counts <- counts[["Peaks"]]
+
+# ----------------------------
+# Create object (RNA + ATAC)
+# ----------------------------
+obj <- CreateSeuratObject(counts = rna_counts, assay = "RNA")
+
+obj[["ATAC"]] <- CreateChromatinAssay(
+  counts    = atac_counts,
+  sep       = c(":", "-"),
+  fragments = frag_path,
+  genome    = "mm10"
+)
+
+# ----------------------------
+# Fix peaks (ranges) to standard chromosomes + mm10 Seqinfo
+# ----------------------------
+DefaultAssay(obj) <- "ATAC"
+
+peak_gr <- granges(obj[["ATAC"]])
+peak_gr <- keepStandardChromosomes(peak_gr, pruning.mode = "coarse")
+
+mm10_si <- Seqinfo::seqinfo(BSgenome.Mmusculus.UCSC.mm10)
+common  <- intersect(seqlevels(peak_gr), seqlevels(mm10_si))
+peak_gr <- keepSeqlevels(peak_gr, common, pruning.mode = "coarse")
+
+Seqinfo::seqinfo(peak_gr) <- mm10_si[common]
+Seqinfo::genome(peak_gr)  <- "mm10"
+
+# put back (works across versions)
+obj[["ATAC"]]@ranges <- peak_gr
+
+# ----------------------------
+# Build annotation matched to peaks + attach
+# ----------------------------
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
+seqlevelsStyle(annotations) <- "UCSC"
+annotations <- keepStandardChromosomes(annotations, pruning.mode = "coarse")
+annotations <- keepSeqlevels(annotations, seqlevels(peak_gr), pruning.mode = "coarse")
+
+Seqinfo::seqinfo(annotations) <- Seqinfo::seqinfo(peak_gr)
+Seqinfo::genome(annotations)  <- "mm10"
+
+Annotation(obj[["ATAC"]]) <- annotations
+
+
+
+```
+
+```{r}
+# Fragment counts (correct column names for  output) 
+frag_path <- Fragments(obj[["ATAC"]])[[1]]@path
+stopifnot(is.character(frag_path), length(frag_path) == 1, file.exists(frag_path))
+
+fc <- CountFragments(fragments = frag_path, cells = colnames(obj))
+rownames(fc) <- fc$CB
+
+# Add fragment stats to metadata
+obj <- AddMetaData(
+  obj,
+  fc[, c("frequency_count", "reads_count", "mononucleosomal", "nucleosome_free"), drop = FALSE]
+)
+
+# Standard QC fields (vignette-style)
+obj$passed_filters <- obj$reads_count
+obj$peak_region_fragments <- obj$nCount_ATAC
+obj$pct_reads_in_peaks <- 100 * obj$peak_region_fragments / pmax(obj$passed_filters, 1)
+```
+
+
+```{r}
+#  RNA QC 
+DefaultAssay(obj) <- "RNA"
+obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^mt-")
+
+#ATAC QC metrics (require fragments + annotation) 
+DefaultAssay(obj) <- "ATAC"
+obj <- NucleosomeSignal(obj)
+obj <- TSSEnrichment(obj)
+
+# Quick check
+head(obj@meta.data[, c("peak_region_fragments","passed_filters","pct_reads_in_peaks",
+                      "TSS.enrichment","nucleosome_signal",
+                      "mononucleosomal","nucleosome_free"), drop = FALSE])
+```
+
+
+```{r}
+VlnPlot(
+  obj,
+  features = c(
+    "nCount_RNA", "nFeature_RNA", "percent.mt",
+    "passed_filters", "peak_region_fragments", "pct_reads_in_peaks",
+    "TSS.enrichment", "nucleosome_signal"
+  ),
+  ncol = 3, pt.size = 0
+)
+
+FeatureScatter(obj, feature1 = "peak_region_fragments", feature2 = "TSS.enrichment")
+FeatureScatter(obj, feature1 = "passed_filters",       feature2 = "pct_reads_in_peaks")
+FeatureScatter(obj, feature1 = "nCount_RNA",           feature2 = "percent.mt")
+
+VlnPlot(
+  obj,
+  features = c("passed_filters", "peak_region_fragments", "pct_reads_in_peaks",
+               "TSS.enrichment", "nucleosome_signal"),
+  ncol = 3, pt.size = 0
+)
+
+# Density scatter (2D binned) QC plots
+
+
+DefaultAssay(obj) <- "ATAC"
+
+DensityScatter(obj, x = "peak_region_fragments", y = "TSS.enrichment",   log_x = TRUE)
+DensityScatter(obj, x = "passed_filters",       y = "pct_reads_in_peaks", log_x = TRUE)
+DensityScatter(obj, x = "passed_filters",       y = "nucleosome_signal",  log_x = TRUE)
+
+DefaultAssay(obj) <- "RNA"
+DensityScatter(obj, x = "nCount_RNA",   y = "percent.mt",   log_x = TRUE)
+DensityScatter(obj, x = "nCount_RNA",   y = "nFeature_RNA", log_x = TRUE, log_y = TRUE)
+
+
+
+```
+
+```{r}
+# Find assays/layers whose colnames don't match the Seurat object's colnames
+cells <- colnames(obj)
+
+check_layers <- function(obj, assay) {
+  a <- obj[[assay]]
+  lyr <- Layers(a)
+  out <- data.frame(assay = assay, layer = lyr, ncol = NA_integer_, mismatch = NA, stringsAsFactors = FALSE)
+
+  for (i in seq_along(lyr)) {
+    m <- tryCatch(GetAssayData(obj, assay = assay, layer = lyr[i]), error = function(e) NULL)
+    if (is.null(m)) next
+    out$ncol[i] <- ncol(m)
+    out$mismatch[i] <- !identical(colnames(m), cells)
+  }
+  out
+}
+
+assays <- Assays(obj)
+res <- do.call(rbind, lapply(assays, function(a) check_layers(obj, a)))
+print(res)
+
+# Show which ones mismatch
+subset(res, mismatch == TRUE)
+
+
+
+
+```
+```{r}
+cells <- colnames(obj)
+
+# Pull ATAC layers
+atac_counts <- GetAssayData(obj, assay = "ATAC", layer = "counts")
+atac_data   <- GetAssayData(obj, assay = "ATAC", layer = "data")
+
+# Reorder columns to match obj (this also drops any extra columns if they exist)
+atac_counts <- atac_counts[, cells, drop = FALSE]
+atac_data   <- atac_data[,   cells, drop = FALSE]
+
+# Write them back
+obj <- SetAssayData(obj, assay = "ATAC", layer = "counts", new.data = atac_counts)
+obj <- SetAssayData(obj, assay = "ATAC", layer = "data",   new.data = atac_data)
+
+# Re-check mismatch (should now be FALSE)
+check_layers(obj, "ATAC")
+
+```
+```{r}
+ 
+
+# Safety: align ATAC layer column order to Seurat object (prevents subsetting bugs)
+
+cells <- colnames(obj)
+
+atac_counts <- GetAssayData(obj, assay = "ATAC", layer = "counts")[, cells, drop = FALSE]
+obj <- SetAssayData(obj, assay = "ATAC", layer = "counts", new.data = atac_counts)
+
+if ("data" %in% Layers(obj[["ATAC"]])) {
+  atac_data <- GetAssayData(obj, assay = "ATAC", layer = "data")[, cells, drop = FALSE]
+  obj <- SetAssayData(obj, assay = "ATAC", layer = "data", new.data = atac_data)
+}
+
+
+#  Make cells.keep (RELAXED)
+
+md <- obj@meta.data[cells, , drop = FALSE]
+stopifnot(identical(rownames(md), cells))
+
+keep <- with(md,
+  !is.na(nFeature_RNA) & !is.na(percent.mt) &
+  !is.na(peak_region_fragments) & !is.na(passed_filters) &
+  !is.na(pct_reads_in_peaks) & !is.na(TSS.enrichment) &
+  !is.na(nucleosome_signal) &
+  nFeature_RNA > 300 &
+  nFeature_RNA < 12000 &
+  percent.mt < 10 &
+  peak_region_fragments > 500 &
+  peak_region_fragments < 80000 &
+  passed_filters > 2000 &
+  passed_filters < 250000 &
+  pct_reads_in_peaks > 3 &
+  TSS.enrichment > 2 &
+  nucleosome_signal < 2
+)
+
+cells.keep <- cells[keep]
+cat("Cells before:", length(cells), "\n")
+cat("Cells after filter:", length(cells.keep), "\n")
+
+
+#  Rebuild a CLEAN filtered object from counts (avoids Seurat subset() bugs)
+
+rna_counts_sub  <- GetAssayData(obj, assay = "RNA",  layer = "counts")[, cells.keep, drop = FALSE]
+atac_counts_sub <- GetAssayData(obj, assay = "ATAC", layer = "counts")[, cells.keep, drop = FALSE]
+md_sub <- md[cells.keep, , drop = FALSE]
+
+frag_path <- Fragments(obj[["ATAC"]])[[1]]@path
+ann_full  <- Annotation(obj[["ATAC"]])
+
+
+#  Build peak ranges robustly from ATAC rownames (drops only malformed peaks)
+
+peak_names <- rownames(atac_counts_sub)
+spl <- strsplit(peak_names, "[:-]")
+
+mat <- t(vapply(spl, function(x) {
+  if (length(x) < 3) x <- c(x, rep(NA_character_, 3 - length(x)))
+  x[1:3]
+}, character(3)))
+
+seqs  <- mat[, 1]
+start <- suppressWarnings(as.integer(mat[, 2]))
+end   <- suppressWarnings(as.integer(mat[, 3]))
+
+valid <- !is.na(seqs) & !is.na(start) & !is.na(end)
+
+cat("Total peaks:", length(peak_names), "\n")
+cat("Valid peaks:", sum(valid), "\n")
+cat("Dropped peaks (bad names):", sum(!valid), "\n")
+if (any(!valid)) print(head(peak_names[!valid], 10))
+
+peak_gr <- GenomicRanges::GRanges(
+  seqnames = seqs[valid],
+  ranges   = IRanges::IRanges(start = start[valid], end = end[valid])
+)
+names(peak_gr) <- peak_names[valid]
+
+# subset ATAC matrix to valid peaks
+atac_counts_sub <- atac_counts_sub[names(peak_gr), , drop = FALSE]
+
+# Optional: keep standard chromosomes (recommended)
+peak_gr <- keepStandardChromosomes(peak_gr, pruning.mode = "coarse")
+atac_counts_sub <- atac_counts_sub[names(peak_gr), , drop = FALSE]
+
+# Match annotation to peak chromosomes
+ann_sub <- keepSeqlevels(ann_full, seqlevels(peak_gr), pruning.mode = "coarse")
+
+
+# 4) Create new Seurat object
+
+obj_filt <- CreateSeuratObject(counts = rna_counts_sub, assay = "RNA", meta.data = md_sub)
+
+obj_filt[["ATAC"]] <- CreateChromatinAssay(
+  counts     = atac_counts_sub,
+  sep        = c(":", "-"),
+  fragments  = frag_path,
+  genome     = "mm10",
+  annotation = ann_sub,
+  ranges     = peak_gr
+)
+
+
+#  Replace old object + sanity checks
+
+obj <- obj_filt
+rm(obj_filt)
+
+cat("Final cells:", ncol(obj), "\n")
+cat("Final ATAC peaks:", nrow(GetAssayData(obj, assay = "ATAC", layer = "counts")), "\n")
+
+ Signac::Fragments(obj[["ATAC"]])[[1]]
+Assays(obj)
+
+
+
+```
+
+```{r}
+stopifnot(ncol(obj) == 27890 && nrow(GetAssayData(obj, assay="ATAC", layer="counts")) == length(granges(obj[["ATAC"]])))
+
+```
+
+```{r}
+
+saveRDS(obj, file = "obj_qc_filtered.rds")
+
+
+```
+
+
+```{r}
+
+```
+
+
