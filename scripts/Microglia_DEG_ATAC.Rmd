@@ -1,0 +1,934 @@
+---
+title: "Untitled"
+author: "Aakash Deva Thirukonda Prakash"
+
+output: html_document
+---
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+library(Seurat)
+library(Signac)
+library(ggplot2)
+library(patchwork)
+library(future)
+library(dplyr)
+
+plan(multisession, workers = 4) # Parallel processing for speed
+options(future.globals.maxSize = Inf)
+```
+
+```{r}
+# Load the pre-filtered object
+obj <- readRDS("obj_qc_filtered.rds")
+```
+
+
+
+```{r}
+DefaultAssay(obj) <- "RNA"
+
+# Define marker list for both SCT preservation and Annotation
+markers_brain <- list(
+  Oligodendrocytes = c("Mbp","Plp1","Mog","Mag","Cnp","Mobp","Sox10"),
+  OPC = c("Pdgfra","Cspg4","Vcan","Olig1","Olig2","Gpr17","Nkx2-2"),
+  Microglia = c("P2ry12","Tmem119","Cx3cr1","Aif1","Lpl","Tyrobp","Trem2"),
+  Pericytes_Endothelial = c("Pecam1","Kdr","Vwf","Flt1","Pdgfrb","Rgs5","Des","Mcam"),
+  Inhibitory_Neurons = c("Gad1","Gad2","Slc6a1","Slc32a1","Pvalb","Sst","Vip"),
+  Excitatory_Neurons = c("Slc17a7","Slc17a6","Camk2a","Camk2b","Tbr1","Satb2","Reln"),
+  Astrocytes = c("Aqp4","Aldh1l1","Slc1a3","Gfap","S100b","Sox9","Clu")
+)
+
+#  Ensure markers are NOT filtered out by SCTransform
+obj <- SCTransform(
+  obj,
+  vars.to.regress = "percent.mt",
+  conserve.memory = TRUE,
+  return.only.var.genes = FALSE, 
+  verbose = FALSE
+)
+
+obj <- RunPCA(obj, npcs = 50, verbose = FALSE)
+
+#  Check PCA Elbow
+ElbowPlot(obj, ndims = 50)
+```
+
+```{r}
+DefaultAssay(obj) <- "ATAC"
+
+obj <- RunTFIDF(obj)
+obj <- FindTopFeatures(obj, min.cutoff = "q25")
+obj <- RunSVD(obj)
+
+#: Check correlation between LSI components and depth
+
+DepthCor(obj)
+```
+
+```{r}
+# Integration using both modalities
+obj <- FindMultiModalNeighbors(
+  obj,
+  reduction.list = list("pca", "lsi"),
+  dims.list = list(1:30, 2:30), # Adjust based on Elbow/DepthCor
+  modality.weight.name = "RNA.weight"
+)
+
+obj <- RunUMAP(
+  obj, 
+  nn.name = "weighted.nn", 
+  reduction.name = "wnn.umap", 
+  reduction.key = "wnnUMAP_"
+)
+
+obj <- FindClusters(
+  obj, 
+  graph.name = "wsnn", 
+  algorithm = 3, 
+  resolution = 0.5, 
+  verbose = FALSE
+)
+
+# Initial Visualization
+DimPlot(obj, reduction = "wnn.umap", label = TRUE, repel = TRUE) +
+  ggtitle("WNN UMAP - clusters")
+```
+
+
+```{r}
+# Discovery of markers for  specific clusters
+DefaultAssay(obj) <- "SCT"
+
+markers <- FindAllMarkers(
+  obj,
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25
+)
+
+# Extract and save top 10
+top10 <- markers %>% group_by(cluster) %>% slice_max(n = 10, order_by = avg_log2FC)
+
+write.csv(top10, file = "top10_markers_by_cluster_v3.csv", row.names = FALSE)
+
+```
+
+```{r}
+print(top10)
+```
+
+```{r}
+#  Robust Annotation with Margin Check
+markers_present <- lapply(markers_brain, function(x) x[x %in% rownames(obj)])
+
+obj <- AddModuleScore(
+  object = obj,
+  features = markers_present,
+  name = "CT_Score_"
+)
+
+#  Renaming
+ct_names <- names(markers_present)
+new_cols <- tail(colnames(obj@meta.data), length(ct_names))
+colnames(obj@meta.data)[colnames(obj@meta.data) %in% new_cols] <- paste0("Score_", ct_names)
+
+# Assign based on highest score vs runner-up 
+score_cols <- paste0("Score_", ct_names)
+score_mat <- as.matrix(obj@meta.data[, score_cols])
+
+best_idx <- max.col(score_mat, ties.method = "first")
+
+# Find runner-up
+temp_mat <- score_mat
+for(i in 1:nrow(score_mat)) { temp_mat[i, best_idx[i]] <- -Inf }
+second_best_idx <- max.col(temp_mat, ties.method = "first")
+
+obj$top_score <- score_mat[cbind(1:nrow(score_mat), best_idx)]
+obj$margin <- obj$top_score - score_mat[cbind(1:nrow(score_mat), second_best_idx)]
+
+# Labeling with logic gate (adjust threshold 0.05 if needed)
+obj$celltype_marker <- ct_names[best_idx]
+obj$celltype_marker[obj$top_score <= 0 | obj$margin < 0.05] <- "Unknown/Ambiguous"
+```
+
+```{r}
+# Compare Cluster IDs vs Marker Labels
+p1 <- DimPlot(obj, reduction = "wnn.umap", group.by = "celltype_marker", label = TRUE, repel = TRUE) +
+  ggtitle("Marker-based automated annotation")
+
+# QC of the annotation scores
+p2 <- VlnPlot(obj, features = "top_score", group.by = "celltype_marker", pt.size = 0) +
+  ggtitle("Marker-score confidence")
+
+print(p1)
+
+print(p2)
+
+# DotPlot for Marker verification
+DotPlot(obj, features = unique(unlist(markers_present)), group.by = "celltype_marker") + 
+  RotatedAxis() + ggtitle("Marker Expression across Predicted Types")
+```
+
+```{r}
+# RNA-only UMAP
+obj <- RunUMAP(obj, reduction = "pca", dims = 1:30, reduction.name = "rna.umap")
+
+# ATAC-only UMAP
+obj <- RunUMAP(obj, reduction = "lsi", dims = 2:30, reduction.name = "atac.umap")
+
+p_rna <- DimPlot(obj, reduction = "rna.umap", group.by = "celltype_marker", pt.size = 0.1) + ggtitle("RNA UMAP")
+p_atac <- DimPlot(obj, reduction = "atac.umap", group.by = "celltype_marker", pt.size = 0.1) + ggtitle("ATAC UMAP")
+
+print(p_rna + p_atac)
+```
+
+```{r}
+# Extract barcode suffix (often used for sample ID or batch)
+obj$barcode_suffix <- gsub(".*-", "", rownames(obj@meta.data))
+print(table(obj$barcode_suffix))
+```
+
+```{r}
+obj$celltype_final <- obj$celltype_marker
+
+
+sample_dist <- table(obj$celltype_final, obj$barcode_suffix)
+
+# Convert to a data frame for plotting
+sample_dist_df <- as.data.frame(sample_dist)
+colnames(sample_dist_df) <- c("CellType", "SampleID", "CellCount")
+
+# Calculate proportions within each sample 
+sample_dist_df <- sample_dist_df %>%
+  group_by(SampleID) %>%
+  mutate(Percent = (CellCount / sum(CellCount)) * 100)
+
+#  Bar Plot
+ggplot(sample_dist_df, aes(x = SampleID, y = Percent, fill = CellType)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Cell Type Distribution Across 12 Samples",
+       x = "Sample (Barcode Suffix)",
+       y = "Percentage of Cells",
+       fill = "Annotated Cell Type") +
+  scale_fill_brewer(palette = "Set3")
+```
+
+```{r}
+saveRDS(obj, "multiome_WNN_final_processed_v3.rds")
+```
+
+```{r}
+# columns 
+colnames(obj@meta.data)
+
+# first 10
+head(obj@meta.data[, 1:10])
+```
+
+```{r}
+
+# Extract aggr index from cell barcodes
+obj$aggr_index <- as.character(str_extract(colnames(obj), "\\d+$"))
+if (any(is.na(obj$aggr_index))) stop("Could not parse aggr_index from some cell barcodes.")
+
+# Lookup table
+sample_metadata <- tribble(
+  ~aggr_index, ~sample_id,      ~condition, ~age_months,
+  "1",         "AD_17p9_rep4",  "AD",       17.9,
+  "2",         "AD_17p9_rep5",  "AD",       17.9,
+  "3",         "AD_2p5_rep2",   "AD",       2.5,
+  "4",         "AD_2p5_rep3",   "AD",       2.5,
+  "5",         "AD_5p7_rep2",   "AD",       5.7,
+  "6",         "AD_5p7_rep6",   "AD",       5.7,
+  "7",         "WT_13p4_rep2",  "WT",       13.4,
+  "8",         "WT_13p4_rep5",  "WT",       13.4,
+  "9",         "WT_2p5_rep2",   "WT",       2.5,
+  "10",        "WT_2p5_rep7",   "WT",       2.5,
+  "11",        "WT_5p7_rep2",   "WT",       5.7,
+  "12",        "WT_5p7_rep3",   "WT",       5.7
+)
+
+#  Map
+meta_idx <- match(obj$aggr_index, sample_metadata$aggr_index)
+
+obj$sample_id  <- sample_metadata$sample_id[meta_idx]
+obj$condition  <- sample_metadata$condition[meta_idx]
+obj$age_months <- sample_metadata$age_months[meta_idx]
+obj$condition_age <- paste0(obj$condition, "_", obj$age_months, "mo")
+
+#   checks
+if (any(is.na(obj$sample_id))) stop("Some barcodes did not match the metadata table!")
+
+table(obj$condition)
+table(obj$sample_id)
+table(obj$condition_age)
+
+#  Plot
+DimPlot(obj, reduction = "wnn.umap", group.by = "condition", shuffle = TRUE) +
+  ggtitle("WNN UMAP colored by reconstructed condition (AD vs WT)")
+
+
+```
+
+
+```{r}
+#cell types 
+obj$celltype_final <- obj$celltype_marker
+Idents(obj) <- "celltype_final"
+table(Idents(obj))
+
+```
+
+```{r}
+ct_col <- "celltype_final"
+if (!ct_col %in% colnames(obj@meta.data)) ct_col <- "celltype_marker"
+
+obj@meta.data[[ct_col]] <- as.character(obj@meta.data[[ct_col]])
+obj$condition <- as.character(obj$condition)
+
+DefaultAssay(obj) <- "SCT"
+```
+
+```{r}
+run_deg_for_celltype <- function(ct_name, min_cells = 20) {
+
+  cells_ct <- rownames(obj@meta.data)[obj@meta.data[[ct_col]] %in% ct_name]
+  ct_obj <- obj[, cells_ct]
+
+  cells_AD <- rownames(ct_obj@meta.data)[ct_obj$condition %in% "AD"]
+  cells_WT <- rownames(ct_obj@meta.data)[ct_obj$condition %in% "WT"]
+
+  print(ct_name)
+  print(table(ct_obj$condition))
+
+  if (length(cells_AD) < min_cells || length(cells_WT) < min_cells) {
+    stop("Not enough AD or WT cells for ", ct_name)
+  }
+
+  deg <- FindMarkers(
+    ct_obj,
+    cells.1 = cells_AD,
+    cells.2 = cells_WT,
+    logfc.threshold = 0,
+    min.pct = 0.1
+  )
+
+  deg$gene <- rownames(deg)
+  deg <- deg[order(deg$p_val_adj), ]
+  deg
+}
+```
+
+```{r}
+DefaultAssay(obj) <- "SCT"
+
+ct_name <- "Microglia"
+cells_ct <- rownames(obj@meta.data)[obj@meta.data$celltype_final %in% ct_name]
+ct_obj <- obj[, cells_ct]
+
+cells_AD <- rownames(ct_obj@meta.data)[ct_obj$condition %in% "AD"]
+cells_WT <- rownames(ct_obj@meta.data)[ct_obj$condition %in% "WT"]
+
+ct_obj$group_DEG <- "WT"
+ct_obj$group_DEG[rownames(ct_obj@meta.data) %in% cells_AD] <- "AD"
+
+Idents(ct_obj) <- "group_DEG"
+table(Idents(ct_obj))
+
+deg_microglia <- FindMarkers(
+  ct_obj,
+  ident.1 = "AD",
+  ident.2 = "WT",
+  logfc.threshold = 0,
+  min.pct = 0.1
+)
+
+deg_microglia$gene <- rownames(deg_microglia)
+deg_microglia <- deg_microglia[order(deg_microglia$p_val_adj), ]
+
+head(deg_microglia, 20)
+deg_microglia["Slc1a3", ]
+
+write.csv(deg_microglia, "deg_Microglia_AD_vs_WTv3.csv", row.names = FALSE)
+
+```
+
+```{r}
+deg_microglia$DE_class <- "Not significant"
+
+deg_microglia$DE_class[
+  deg_microglia$p_val_adj < 0.05 &
+  deg_microglia$avg_log2FC > 0.5
+] <- "AD up"
+
+deg_microglia$DE_class[
+  deg_microglia$p_val_adj < 0.05 &
+  deg_microglia$avg_log2FC < -0.5
+] <- "AD down"
+
+```
+
+```{r}
+ggplot(deg_microglia,
+       aes(x = avg_log2FC,
+           y = -log10(p_val_adj),
+           color = DE_class)) +
+  geom_point(alpha = 0.7, size = 1.2) +
+  scale_color_manual(
+    values = c(
+      "AD up" = "#D62728",
+      "AD down" = "#1F77B4",
+      "Not significant" = "grey70"
+    )
+  ) +
+  geom_vline(xintercept = c(-0.5, 0.5),
+             linetype = "dashed",
+             color = "grey40") +
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed",
+             color = "grey40") +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Microglia RNA differential expression (AD vs WT)",
+    x = "log2 fold change (AD / WT)",
+    y = "-log10 adjusted p-value",
+    color = ""
+  )
+
+
+```
+
+```{r}
+deg_microglia$avg_expr <- (deg_microglia$pct.1 + deg_microglia$pct.2) / 2
+
+p_ma <- ggplot(deg_microglia, aes(x = avg_expr, y = avg_log2FC, color = DE_class)) +
+  geom_point(alpha = 0.7, size = 1.2) +
+  scale_color_manual(values = c(
+    "AD up" = "#D62728",
+    "AD down" = "#1F77B4",
+    "Not significant" = "grey70"
+  )) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Microglia MA-style plot (AD vs WT)",
+    x = "Average detection fraction (pct.1 and pct.2)",
+    y = "log2 fold change (AD / WT)",
+    color = ""
+  )
+
+print(p_ma)
+
+```
+
+```{r}
+micro <- subset(
+  obj,
+  subset = celltype_final %in% "Microglia"
+)
+
+micro
+table(micro$celltype_final)
+table(micro$condition)
+table(micro$condition_age)
+```
+
+```{r}
+DefaultAssay(micro) <- "SCT"
+
+micro <- FindVariableFeatures(micro, nfeatures = 2000)
+
+micro <- RunPCA(micro, npcs = 30, verbose = FALSE)
+
+ElbowPlot(micro)
+```
+```{r}
+micro <- FindMultiModalNeighbors(
+  micro,
+  reduction.list = list("pca", "lsi"),
+  dims.list = list(1:15, 2:15),
+  modality.weight.name = "RNA.weight"
+)
+```
+```{r}
+micro <- FindClusters(
+  micro,
+  graph.name = "wsnn",
+  resolution = 0.3
+)
+
+micro <- RunUMAP(
+  micro,
+  nn.name = "weighted.nn",
+  reduction.name = "micro_umap"
+)
+```
+```{r}
+DimPlot(micro, reduction = "micro_umap", label = TRUE) +
+  ggtitle("Microglia states (WNN)")
+```
+```{r}
+DimPlot(micro, reduction = "micro_umap", group.by = "condition") +
+  ggtitle("Microglia states by condition")
+```
+```{r}
+DimPlot(micro, reduction = "micro_umap", group.by = "condition_age") +
+  ggtitle("Microglia states by age")
+```
+
+```{r}
+prop.table(table(micro$seurat_clusters, micro$condition_age), 1)
+```
+
+```{r}
+library(Seurat)
+
+DefaultAssay(micro) <- "SCT"
+Idents(micro) <- "seurat_clusters"
+
+levels(Idents(micro))
+
+
+```
+```{r}
+micro_state_DE <- list()
+
+for (st in levels(Idents(micro))) {
+
+  message("Running DEG for microglia state ", st)
+
+  deg <- FindMarkers(
+    micro,
+    ident.1 = st,
+    ident.2 = NULL,        # state vs all other microglia
+    logfc.threshold = 0,
+    min.pct = 0.1
+  )
+
+  deg$gene <- rownames(deg)
+  deg$state <- st
+  deg <- deg[order(deg$p_val_adj), ]
+
+  micro_state_DE[[st]] <- deg
+
+  write.csv(
+    deg,
+    paste0("Microglia_state_", st, "_vs_rest_DEG.csv"),
+    row.names = FALSE
+  )
+}
+all_state_deg <- bind_rows(micro_state_DE)
+```
+```{r}
+state_specific_markers <- all_state_deg %>%
+  filter(p_val_adj < 0.05, avg_log2FC > 0.5) %>%
+  group_by(state, gene) %>%
+  summarise(logFC = max(avg_log2FC), .groups = "drop")
+
+```
+
+```{r}
+top_markers_per_state <- state_specific_markers %>%
+  group_by(state) %>%
+  arrange(desc(logFC)) %>%
+  slice_head(n = 50)
+```
+
+```{r}
+top_markers_per_state %>% filter(state == "4")
+```
+
+```{r}
+# Subset to 2.5 month microglia only
+micro_early <- subset(obj, 
+  celltype_final == "Microglia" & age_months == 2.5)
+
+# Check counts
+table(micro_early$condition)
+
+# Set up comparison
+Idents(micro_early) <- "condition"
+
+# Run DEG - early timepoint only
+DefaultAssay(micro_early) <- "SCT"
+deg_micro_early <- FindMarkers(
+  micro_early,
+  ident.1 = "AD",  
+  ident.2 = "WT",
+  logfc.threshold = 0,
+  min.pct = 0.05
+)
+
+# Look at top hits
+head(deg_micro_early[order(deg_micro_early$p_val_adj), ], 30)
+```
+
+```{r}
+table(obj$celltype_final == "Microglia" & obj$age_months == 2.5, obj$condition)
+
+```
+
+```{r}
+VlnPlot(micro_early, features = "Slc1a3", assay = "RNA", slot = "counts")
+```
+```{r}
+# Subset to 5.7 month microglia only
+micro_mid <- subset(obj, 
+  celltype_final == "Microglia" & age_months == 5.7)
+
+# Check counts
+table(micro_mid$condition)
+
+# Set up comparison
+Idents(micro_mid) <- "condition"
+
+# Run DEG - mid timepoint only
+DefaultAssay(micro_mid) <- "SCT"
+
+deg_micro_mid <- FindMarkers(
+  micro_mid,
+  ident.1 = "AD",
+  ident.2 = "WT",
+  logfc.threshold = 0,
+  min.pct = 0.05
+)
+
+# Look at top hits
+head(deg_micro_mid[order(deg_micro_mid$p_val_adj), ], 30)
+
+# Check Slc1a3 specifically
+deg_micro_mid["Slc1a3", ]
+
+# Violin plot for 5.7 months
+VlnPlot(micro_mid, features = "Slc1a3", group.by = "condition", pt.size = 0.1) +
+  ggtitle("Slc1a3 in Microglia - 5.7 months")
+
+```
+```{r}
+# Combine early and mid timepoint microglia
+micro_early_mid <- subset(obj, 
+  celltype_final == "Microglia" & age_months %in% c(2.5, 5.7))
+
+# Create combined label
+micro_early_mid$condition_time <- paste0(micro_early_mid$condition, "_", 
+                                          micro_early_mid$age_months, "mo")
+
+# Reorder factor levels for better visualization
+micro_early_mid$condition_time <- factor(micro_early_mid$condition_time,
+  levels = c("WT_2.5mo", "AD_2.5mo", "WT_5.7mo", "AD_5.7mo"))
+
+# Combined violin plot
+VlnPlot(micro_early_mid, 
+        features = "Slc1a3", 
+        group.by = "condition_time",
+        pt.size = 0.1,
+        cols = c("#00BFC4", "#F8766D", "#00BFC4", "#F8766D")) +
+  ggtitle("Slc1a3 in Microglia: Early vs Mid Timepoint")
+```
+
+
+
+```{r}
+DefaultAssay(micro_early) <- "ATAC"
+
+# Compute region stats (required for LinkPeaks)
+micro_early <- RegionStats(
+  object = micro_early,
+  genome = BSgenome.Mmusculus.UCSC.mm10,
+  assay = "ATAC"
+)
+
+# Link peaks to Slc1a3 expression
+set.seed(42)
+micro_early <- LinkPeaks(
+  object = micro_early,
+  peak.assay = "ATAC",
+  expression.assay = "SCT",
+  genes.use = "Slc1a3"
+)
+
+# View Slc1a3 links
+slc1a3_links <- Links(micro_early)
+slc1a3_links <- slc1a3_links[slc1a3_links$gene == "Slc1a3"]
+
+cat("\nSlc1a3 peak-gene links:\n")
+slc1a3_df <- as.data.frame(slc1a3_links)
+print(slc1a3_df[, c("peak", "gene", "score", "pvalue", "zscore")])
+```
+
+```{r}
+library(Signac)
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(JASPAR2020)
+library(TFBSTools)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(motifmatchr)
+```
+
+```{r}
+# Subset to 2.5 month microglia ,just doing it again 
+micro_early <- subset(obj, celltype_final == "Microglia" & age_months == 2.5)
+
+# Set up condition factor 
+micro_early$condition <- factor(micro_early$condition, levels = c("WT", "AD"))
+Idents(micro_early) <- "condition"
+
+cat("Cells per condition:\n")
+print(table(micro_early$condition))
+```
+```{r}
+DefaultAssay(micro_early) <- "ATAC"
+
+# Compute region stats , imp for seurat v5
+micro_early <- RegionStats(
+  object = micro_early,
+  genome = BSgenome.Mmusculus.UCSC.mm10,
+  assay = "ATAC"
+)
+
+# Link peaks to Slc1a3 expression
+set.seed(42)
+micro_early <- LinkPeaks(
+  object = micro_early,
+  peak.assay = "ATAC",
+  expression.assay = "SCT",
+  genes.use = "Slc1a3"
+)
+
+# View links
+slc1a3_links <- Links(micro_early)
+slc1a3_links <- slc1a3_links[slc1a3_links$gene == "Slc1a3"]
+
+cat("\nSlc1a3 peak-gene links:\n")
+print(as.data.frame(slc1a3_links)[, c("peak", "score", "pvalue", "zscore")])
+```
+```{r}
+# Annotate link positions relative to Slc1a3 gene body
+# Slc1a3 coordinates: chr15:8634124-8710764
+gene_start <- 8634124
+gene_end <- 8710764
+
+links_df <- as.data.frame(slc1a3_links) %>%
+  mutate(
+    peak_start = as.numeric(sub("chr15-([0-9]+)-.*", "\\1", peak)),
+    location = case_when(
+      peak_start < gene_start ~ "Upstream",
+      peak_start > gene_end ~ "Distal enhancer",
+      TRUE ~ "Intragenic"
+    ),
+    distance_kb = case_when(
+      peak_start < gene_start ~ (gene_start - peak_start) / 1000,
+      peak_start > gene_end ~ (peak_start - gene_end) / 1000,
+      TRUE ~ 0
+    )
+  ) %>%
+  select(peak, score, pvalue, location, distance_kb) %>%
+  arrange(desc(score))
+
+print(links_df)
+```
+```{r}
+DefaultAssay(micro_early) <- "ATAC"
+Idents(micro_early) <- "condition"
+
+# Find all DA peaks (LR test with depth correction)
+da_peaks <- FindMarkers(
+  micro_early,
+  ident.1 = "AD",
+  ident.2 = "WT",
+  test.use = "LR",
+  latent.vars = "nCount_ATAC",
+  logfc.threshold = 0,
+  min.pct = 0.05
+)
+da_peaks$peak <- rownames(da_peaks)
+
+cat("Total peaks tested:", nrow(da_peaks), "\n")
+
+# Filter for Slc1a3 region (chr15: 8.5-8.9 Mb)
+slc1a3_region_peaks <- da_peaks[grep("^chr15-8[5-8][0-9]{5}-", rownames(da_peaks)), ]
+slc1a3_region_peaks <- slc1a3_region_peaks[order(slc1a3_region_peaks$p_val), ]
+
+cat("Peaks in Slc1a3 region:", nrow(slc1a3_region_peaks), "\n\n")
+print(head(slc1a3_region_peaks, 15))
+
+write.csv(slc1a3_region_peaks, "DA_peaks_Slc1a3_regionv3.csv", row.names = FALSE)
+```
+```{r}
+# Summarize by direction (negative log2FC = more open in WT)
+cat("\nWT-enriched peaks (p < 0.1):", 
+    sum(slc1a3_region_peaks$avg_log2FC < 0 & slc1a3_region_peaks$p_val < 0.1), "\n")
+cat("AD-enriched peaks (p < 0.1):", 
+    sum(slc1a3_region_peaks$avg_log2FC > 0 & slc1a3_region_peaks$p_val < 0.1), "\n")
+```
+
+```{r}
+DefaultAssay(micro_early) <- "ATAC"
+Idents(micro_early) <- factor(micro_early$condition, levels = c("WT", "AD"))
+
+cov_plot <- CoveragePlot(
+  object = micro_early,
+  region = "Slc1a3",
+  features = "Slc1a3",
+  expression.assay = "SCT",
+  idents = c("WT", "AD"),
+  extend.upstream = 50000,
+  extend.downstream = 100000,
+  links = TRUE,
+  peaks = TRUE
+) & scale_fill_manual(values = c("WT" = "#619CFF", "AD" = "#F8766D"))
+
+print(cov_plot)
+ggsave("Slc1a3_coverage_microglia_2.5mov3.png", cov_plot, width = 10, height = 6, dpi = 300)
+```
+```{r}
+# Get vertebrate motifs from JASPAR
+pwm_vertebrate <- getMatrixSet(
+  JASPAR2020,
+  opts = list(tax_group = "vertebrates", all_versions = FALSE)
+)
+
+# Add motifs to ATAC assay
+DefaultAssay(micro_early) <- "ATAC"
+micro_early <- AddMotifs(
+  object = micro_early,
+  genome = BSgenome.Mmusculus.UCSC.mm10,
+  pfm = pwm_vertebrate,
+  assay = "ATAC"
+)
+```
+
+```{r}
+# Get significant DA peaks genome-wide
+all_WT_peaks <- rownames(da_peaks[da_peaks$avg_log2FC < -0.25 & da_peaks$p_val < 0.05, ])
+all_AD_peaks <- rownames(da_peaks[da_peaks$avg_log2FC > 0.25 & da_peaks$p_val < 0.05, ])
+
+cat("Genome-wide WT-enriched DA peaks:", length(all_WT_peaks), "\n")
+cat("Genome-wide AD-enriched DA peaks:", length(all_AD_peaks), "\n")
+
+# WT-enriched peak motifs (relevant for Slc1a3 since it's higher in WT)
+if (length(all_WT_peaks) >= 10) {
+  motifs_WT_gw <- FindMotifs(object = micro_early, features = all_WT_peaks)
+  motifs_WT_gw <- motifs_WT_gw[order(motifs_WT_gw$pvalue), ]
+  
+  cat("\n=== TOP 20 MOTIFS IN WT-ENRICHED PEAKS ===\n")
+  print(head(motifs_WT_gw[, c("motif.name", "fold.enrichment", "pvalue", "p.adjust")], 20))
+  
+  cat("\n=== EGR FAMILY ===\n")
+  print(motifs_WT_gw[grep("EGR", motifs_WT_gw$motif.name, ignore.case = TRUE), 
+                     c("motif.name", "fold.enrichment", "pvalue")])
+  
+  cat("\n=== KLF FAMILY ===\n")
+  print(motifs_WT_gw[grep("KLF", motifs_WT_gw$motif.name, ignore.case = TRUE), 
+                     c("motif.name", "fold.enrichment", "pvalue")])
+  
+  write.csv(motifs_WT_gw, "Motifs_WT_enriched_peaks.csv", row.names = FALSE)
+}
+
+# AD-enriched peak motifs
+if (length(all_AD_peaks) >= 10) {
+  motifs_AD_gw <- FindMotifs(object = micro_early, features = all_AD_peaks)
+  motifs_AD_gw <- motifs_AD_gw[order(motifs_AD_gw$pvalue), ]
+  
+  cat("\n=== TOP 20 MOTIFS IN AD-ENRICHED PEAKS ===\n")
+  print(head(motifs_AD_gw[, c("motif.name", "fold.enrichment", "pvalue", "p.adjust")], 20))
+  
+  write.csv(motifs_AD_gw, "Motifs_AD_enriched_peaks.csv", row.names = FALSE)
+}
+```
+```{r}
+# Check motifs in the distal enhancer (strongest linked peak)
+distal_peak <- GRanges("chr15", IRanges(8801492, 8802323))
+
+all_matches <- matchMotifs(
+  pwm_vertebrate, 
+  distal_peak, 
+  genome = BSgenome.Mmusculus.UCSC.mm10,
+  out = "scores"
+)
+
+match_matrix <- motifMatches(all_matches)
+matched_motifs <- colnames(match_matrix)[which(match_matrix[1, ] == TRUE)]
+motif_names_in_peak <- sapply(matched_motifs, function(x) name(pwm_vertebrate[[x]]))
+
+cat("Motifs in distal enhancer (chr15:8801492-8802323):\n")
+cat("Total motifs found:", length(motif_names_in_peak), "\n\n")
+
+# Check for key TF families
+cat("EGR family:", paste(grep("EGR", motif_names_in_peak, value = TRUE, ignore.case = TRUE), collapse = ", "), "\n")
+cat("KLF family:", paste(grep("KLF", motif_names_in_peak, value = TRUE, ignore.case = TRUE), collapse = ", "), "\n")
+cat("SP family:", paste(grep("^SP[0-9]", motif_names_in_peak, value = TRUE, ignore.case = TRUE), collapse = ", "), "\n")
+```
+```{r}
+# Run chromVAR for per-cell motif activity scores
+micro_early <- RunChromVAR(
+  object = micro_early,
+  genome = BSgenome.Mmusculus.UCSC.mm10,
+  assay = "ATAC"
+)
+
+# Compare Egr1 activity between conditions
+DefaultAssay(micro_early) <- "chromvar"
+
+VlnPlot(micro_early, features = "MA0162.4", group.by = "condition", pt.size = 0) + 
+  ggtitle("Egr1 (MA0162.4) Motif Activity")
+
+# Statistical test
+egr1_scores <- FetchData(micro_early, vars = c("MA0162.4", "condition"))
+wilcox.test(egr1_scores$MA0162.4 ~ egr1_scores$condition)
+```
+```{r}
+DefaultAssay(micro_early) <- "ATAC"
+
+# Top 6 motifs from WT-enriched peaks
+motif_plot <- MotifPlot(object = micro_early, motifs = head(motifs_WT_gw$motif, 6)) +
+  plot_annotation(title = "Top motifs in WT-accessible chromatin (Microglia 2.5mo)")
+
+print(motif_plot)
+ggsave("Top_motifs_WT_enriched.png", motif_plot, width = 14, height = 8, dpi = 300)
+```
+```{r}
+# Combined figure (replicating 10x application note Figure 5)
+egr1_id <- motifs_WT_gw[grep("EGR1$", motifs_WT_gw$motif.name), "motif"][1]
+
+p1 <- CoveragePlot(
+  object = micro_early,
+  region = "Slc1a3",
+  features = "Slc1a3",
+  expression.assay = "SCT",
+  idents = c("WT", "AD"),
+  extend.upstream = 50000,
+  extend.downstream = 100000,
+  links = TRUE,
+  peaks = TRUE
+) & scale_fill_manual(values = c("WT" = "#619CFF", "AD" = "#F8766D"))
+
+p2 <- MotifPlot(object = micro_early, motifs = egr1_id) + 
+  ggtitle("Egr1 motif")
+
+final_figure <- p1 / p2 + 
+  plot_layout(heights = c(4, 1)) +
+  plot_annotation(
+    title = "Replication of 10x Genomics Application Note - Figure 5",
+    subtitle = "Slc1a3 regulation in microglia: chromatin accessibility and TF motifs"
+  )
+
+print(final_figure)
+ggsave("Figure5_replication.png", final_figure, width = 12, height = 10, dpi = 300)
+```
+```{r}
+saveRDS(micro_early, "micro_early_ATAC_analysis.rds")
+```
+
