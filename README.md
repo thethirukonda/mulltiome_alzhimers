@@ -83,6 +83,8 @@ The dataset includes 12 mouse brain samples:
 
 **Result:** 27,890 high-quality cells retained after filtering
 
+note, i applied a strict filterimg, but one can apply a leinent filtering and this may affect downstream process
+
 ---
 
 ### 2. Normalization & Dimensionality Reduction (`Microglia_DEG_ATAC.Rmd`)
@@ -124,12 +126,12 @@ Defined canonical brain cell type markers:
 - Assigned cells based on highest score with margin threshold (≥0.05) to ensure confident assignments
 - Cells with ambiguous scores labeled as "Unknown/Ambiguous"
 
-![Figure 1: WNN UMAP with Cell Type Annotations](/Users/aakash/Downloads/multiome_scrna_and_scatac/scripts/images_plot/Marker_plots.png)![alt text](scripts/images_plot/Marker_plots.png)
+![Figure 1: WNN UMAP with Cell Type Annotations](https://github.com/thethirukonda/mulltiome_alzhimers/blob/71108e9a6717f086bfb0bf83dd5538a128fcd5d1/images/Marker_plots.png)![alt text](scripts/images_plot/Marker_plots.png)
 
 
 **Figure 1: Weighted Nearest Neighbor (WNN) UMAP embedding of 27,890 cells colored by annotated cell type.** Integration of RNA and ATAC modalities enables robust identification of major brain cell populations including neurons, glia, and vascular cells.
 
-![Figure 2: Marker Expression Validation](![alt text]![alt text](scripts/images_plot/Dotplot.png)
+![Figure 2: Marker Expression Validation](![https://github.com/thethirukonda/mulltiome_alzhimers/blob/71108e9a6717f086bfb0bf83dd5538a128fcd5d1/images/dotplot.png]![alt text](scripts/images_plot/Dotplot.png) (
 **Figure 2: DotPlot showing expression of canonical marker genes across predicted cell types.** Dot size represents the percentage of cells expressing each marker; color intensity indicates average expression level. Clear enrichment of expected markers in corresponding cell types validates the annotation approach.
 
 ---
@@ -171,7 +173,7 @@ First performed DEG analysis comparing all AD vs WT microglia pooled across time
 
 Figure 3-  Microglia show selective downregulation of homeostatic genes in AD.
 
-![Figure 4: Microglia show selective downregulation of homeostatic genes in AD.](scripts/images_plot/Microglia_global_DEG.png)
+![Figure 3: Microglia show selective downregulation of homeostatic genes in AD.](https://github.com/thethirukonda/mulltiome_alzhimers/blob/71108e9a6717f086bfb0bf83dd5538a128fcd5d1/images/Microglia_global_DEG.png)
 
 
 Microglia from AD transgenic mice displayed a striking gene expression profile: while APP showed dramatic upregulation (consistent with transgenic amyloid overexpression), the majority of the top altered genes were downregulated, including critical homeostatic mediators Atp8a2 (phospholipid homeostasis),, Pcdh9 (cell adhesion), Il1rapl1 (inflammatory regulation), and Fgf14 (growth signaling). This pattern—loss of homeostatic functions coupled with amyloid response—reflects the expected AD microglial phenotype.But, we cannot distinguish whether microglial dysfunction causes early disease or results from late amyloid accumulation thast why timepoint strafied analysis was done.
@@ -195,7 +197,9 @@ At early disease stages, AD microglia exhibit the expected transcriptional signa
 
 **Finding:** Slc1a3 (glutamate transporter GLAST) is downregulated in AD microglia compared to WT, with the **largest difference at the early 2.5-month timepoint** when plaque deposition is sparse.
 
-![Figure 4: Slc1a3 Expression Across Timepoints](images/03_slc1a3_violin_timepoints.png)![alt text](scripts/images_plot/slc3a.png) [alt text](README_images.md)
+![Figure 4: Slc1a3 Expression Across Timepoints](https://github.com/thethirukonda/mulltiome_alzhimers/blob/71108e9a6717f086bfb0bf83dd5538a128fcd5d1/images/slc3a.png?raw=true)
+
+**Figure 4: Slc1a3 Expression Across Timepoints.** Violin plot showing the distribution of *Slc1a3* expression in microglia across different timepoints in WT and AD conditions.
 
 **Figure 4: Violin plots showing Slc1a3 expression in microglia stratified by condition and timepoint.** Slc1a3 is significantly downregulated in AD microglia at 2.5 months (sparse plaque burden), with the difference diminishing at later timepoints. This replicates the key finding from the 10x Genomics application note.
 
@@ -217,9 +221,11 @@ Performed differential accessibility analysis between AD and WT microglia at 2.5
 - Identified WT-enriched peaks in the Slc1a3 regulatory region
 - These regions show reduced accessibility in AD microglia
 
-![Figure 4: Slc1a3 Chromatin Accessibility and Peak-Gene Links](images/04_slc1a3_coverage_plot.png)![alt text](<scripts/images_plot/Chromatin accesibliy plot.png>)
+![Figure 5: Slc1a3 Chromatin Accessibility and Peak-Gene Links](https://github.com/thethirukonda/mulltiome_alzhimers/blob/71108e9a6717f086bfb0bf83dd5538a128fcd5d1/images/Chromatin%20accesibliy%20plot.png?raw=true)
 
-**Figure 4: Coverage plot showing chromatin accessibility at the Slc1a3 locus in WT vs AD microglia at 2.5 months.** Top tracks display normalized ATAC signal; arcs indicate significant peak-gene links identified by LinkPeaks. A distal enhancer region (~90kb downstream) shows strong correlation with Slc1a3 expression and differential accessibility between conditions.
+**Figure 5: Coverage plot showing chromatin accessibility at the Slc1a3 locus in WT vs AD microglia at 2.5 months.** Top tracks display normalized ATAC signal; arcs indicate significant peak-gene links identified by LinkPeaks. A distal enhancer region (~90kb downstream) shows strong correlation with Slc1a3 expression and differential accessibility between conditions.
+
+
 
 ### Motif Enrichment Analysis
 
@@ -238,12 +244,9 @@ Motif enrichment analysis of differentially accessible chromatin regions identif
 | EGR1 | Early Growth Response | Stress-responsive; secondary role in WT peaks |
 
 
+![Figure 5: Top Enriched Motifs in WT-Accessible Chromatin](https://github.com/thethirukonda/mulltiome_alzhimers/blob/71108e9a6717f086bfb0bf83dd5538a128fcd5d1/images/motifs.png?raw=true)
 
-![Figure 5: Top Enriched Motifs in WT-Accessible Chromatin](images/05_top_motifs_wt.png)![alt text](scripts/images_plot/motifs.png)
-
-
-
-Figure5 : Sequence logos of top transcription factor motifs enriched in WT-accessible chromatin (2.5 month microglia). The KLF family (KLF2, KLF3, KLF6, KLF11, KLF15, KLF16) dominates the homeostatic microglial regulatory landscape, along with SP proteins (SP1, SP3, SP4, SP9), NRF1, and other zinc finger factors. EGR1 appears among enriched motifs but ranks secondary to KLF family members, indicating that KLF-mediated regulation controls WT-accessible homeostatic chromatin including the Slc1a3 enhancer.
+**Figure 5: Sequence logos of top transcription factor motifs enriched in WT-accessible chromatin (2.5 month microglia).** The KLF family (KLF2, KLF3, KLF6, KLF11, KLF15, KLF16) dominates the homeostatic microglial regulatory landscape, along with SP proteins (SP1, SP3, SP4, SP9), NRF1, and other zinc finger factors. EGR1 appears among enriched motifs but ranks secondary to KLF family members, indicating that KLF-mediated regulation controls WT-accessible homeostatic chromatin including the *Slc1a3* enhancer.
 
 While the 10x application note identified EGR1 as an enriched motif in Slc1a3-linked regions, my analysis ranks EGR1 18th among motifs enriched in WT-accessible chromatin, compared to KLF family members which occupy the top positions . This indicates that KLF4 and related KLF factors are the primary regulators while EGR1 acts as a secondary regulator of the WT-accessible Slc1a3 enhancer.
 ### ChromVAR Motif Activity
